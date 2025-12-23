@@ -1,5 +1,5 @@
 [project]
-name = "haiqin-robotics-toolbox"
+name = "hi-robotics"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-haiqin-robotics-toolbox = "haiqin_robotics_toolbox:main"
+hi-robotics = "hi_robotics:main"
 
 [build-system]
 requires = ["uv_build>=0.9.17,<0.10.0"]

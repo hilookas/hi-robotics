@@ -198,10 +198,7 @@ def _se3_get_V(phi: torch.Tensor):
 
     theta = torch.norm(phi, dim=-1) # shape == (B,)
 
-    C = torch.where(torch.abs(theta) < EPS,
-        torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-        torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-    )
+    C = torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)
 
     A = torch.where(torch.abs(theta) < EPS,
         torch.tensor(0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
@@ -232,19 +229,13 @@ def _se3_get_V_inv(phi: torch.Tensor):
 
     theta = torch.norm(phi, dim=-1)
 
-    C = torch.where(torch.abs(theta**2) < EPS,
-        torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-        torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-    )
+    C = torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)
 
-    A = torch.where(torch.abs(theta**2) < EPS,
-        torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
-        torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
-    )
+    A = torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0)
 
-    B = torch.where(torch.abs(theta**2) < EPS,
+    B = torch.where(torch.abs(theta) < EPS,
         torch.tensor(1. / 12., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-        (theta * torch.sin(theta) + 2. * torch.cos(theta) - 2.) / (2. * theta**2 * (torch.cos(theta) - 1.)),
+        (theta * torch.sin(theta) + 2. * torch.cos(theta) - 2.) / (2. * theta**2 * (torch.cos(theta) - 1.)), # theta接近0的时候，
     )
 
     I = torch.eye(3, dtype=phi.dtype, device=phi.device).unsqueeze(0)
@@ -420,7 +411,48 @@ def se3_inv(A: torch.Tensor) -> torch.Tensor:
     return A_inv
 
 
+def sim3_inv(A: torch.Tensor) -> torch.Tensor:
+    """
+    sim3_inv
+
+    Faster version of torch.linalg.inv for Sim3 matrices (similarity transformation).
+    Sim3矩阵结构：(sR  t)，其中s是缩放因子，R是3x3正交旋转矩阵，t是3维平移向量
+                  (0^T 1)
+    逆矩阵公式：  ( (1/s)R^T   -R^T*t/s )
+                  ( 0^T        1        )
+
+    :param A: Sim3矩阵，shape == (..., 4, 4)
+    :type A: torch.Tensor
+    :return: Sim3逆矩阵，shape == (..., 4, 4)
+    :rtype: Tensor
+    """
+    sR = A[..., :3, :3]  # (..., 3, 3)  s*R部分
+    t = A[..., :3, 3]    # (..., 3)     平移向量
+
+    norm_sR = torch.norm(sR, dim=(-2, -1))  # (...,) 计算每个sR的Frobenius范数
+    s = norm_sR / torch.sqrt(torch.tensor(3.0, device=sR.device, dtype=sR.dtype))
+
+    EPS = 1e-8
+
+    R = sR / (s[..., None, None] + EPS)  # (..., 3, 3)  还原纯旋转矩阵
+    R_inv = R.permute(*tuple(range(R.ndim-2)), -1, -2)  # (..., 3, 3)  R^T，适配任意批量维度
+
+    inv_s = 1.0 / (s + EPS)
+    sR_inv = inv_s[..., None, None] * R_inv  # (..., 3, 3)
+
+    t_inv = -torch.matmul(sR_inv, t[..., None])[..., 0]  # (..., 3)
+
+    A_inv = torch.zeros_like(A)
+    A_inv[..., :3, :3] = sR_inv
+    A_inv[..., :3, 3] = t_inv
+    A_inv[..., 3, 3] = 1.0
+
+    return A_inv
+
+
 # Copy from: https://github.com/princeton-vl/lietorch/blob/e7df86554156b36846008d8ddbcc4d8521a16554/lietorch/include/rxso3.h
+# Which is copied from: https://github.com/strasdat/Sophus/blob/d0b7315a0d90fc6143defa54596a3a95d9fa10ec/sophus/so3.hpp
+# MAGIC CODE!
 # See: https://github.com/borglab/gtsam/blob/ef33d45aea433da506447759ec949af30dc8e38f/gtsam/geometry/Similarity3.cpp
 
 EPS = 1e-6
@@ -442,14 +474,8 @@ def _sim3_get_V(phi: torch.Tensor, sigma: torch.Tensor):
     scale = torch.exp(sigma.squeeze(-1)) # shape == (B,)
 
     C = torch.where(torch.abs(sigma) < EPS,
-        torch.where(torch.abs(theta) < EPS,
-            torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-        ),
-        torch.where(torch.abs(theta) < EPS,
-            (scale - 1.) / sigma,
-            (scale - 1.) / sigma,
-        )
+        torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
+        (scale - 1.) / sigma,
     )
 
     A = torch.where(torch.abs(sigma) < EPS,
@@ -460,7 +486,7 @@ def _sim3_get_V(phi: torch.Tensor, sigma: torch.Tensor):
         torch.where(torch.abs(theta) < EPS,
             ((sigma - 1.) * scale + 1.) / (sigma**2),
             (scale * torch.sin(theta) * sigma + (1. - scale * torch.cos(theta)) * theta) / (theta * (theta**2 + sigma**2)),
-        )
+        ),
     )
 
     B = torch.where(torch.abs(sigma) < EPS,
@@ -470,8 +496,8 @@ def _sim3_get_V(phi: torch.Tensor, sigma: torch.Tensor):
         ),
         torch.where(torch.abs(theta) < EPS,
             (scale * 0.5 * sigma**2 + scale - 1. - sigma * scale) / (sigma**3),
-            ((scale - 1.) / sigma - ((scale * torch.cos(theta) - 1.) * sigma + scale * torch.sin(theta) * theta) / (theta**2 + sigma**2)) * 1. / (theta**2),
-        )
+            ((scale - 1.) / sigma - ((scale * torch.cos(theta) - 1.) * sigma + scale * torch.sin(theta) * theta) / (theta**2 + sigma**2)) / (theta**2),
+        ),
     )
 
     I = torch.eye(3, dtype=phi.dtype, device=phi.device).unsqueeze(0)
@@ -496,37 +522,28 @@ def _sim3_get_V_inv(phi: torch.Tensor, sigma: torch.Tensor):
     theta = torch.norm(phi, dim=-1)
     scale = torch.exp(sigma.squeeze(-1))
 
-    C = torch.where(torch.abs(sigma**2) < EPS,
-        torch.where(torch.abs(theta**2) < EPS,
-            1. - 0.5 * sigma, # ？？？为什么这里有个sigma？？？
-            1. - 0.5 * sigma,
-        ),
-        torch.where(torch.abs(theta**2) < EPS,
-            sigma / (scale - 1.),
-            sigma / (scale - 1.),
-        )
+    C = torch.where(torch.abs(sigma) < EPS,
+        1. - 0.5 * sigma,
+        sigma / (scale - 1.),
     )
 
-    A = torch.where(torch.abs(sigma**2) < EPS,
-        torch.where(torch.abs(theta**2) < EPS,
-            torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
-        ),
-        torch.where(torch.abs(theta**2) < EPS,
+    A = torch.where(torch.abs(sigma) < EPS,
+        torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
+        torch.where(torch.abs(theta) < EPS,
             (-sigma * scale + scale - 1.) / ((scale - 1.) * (scale - 1.)),
             (theta * scale * torch.cos(theta) - theta - sigma * scale * torch.sin(theta)) / (theta * (scale**2 - 2. * scale * torch.cos(theta) + 1.)),
-        )
+        ),
     )
 
-    B = torch.where(torch.abs(sigma**2) < EPS,
-        torch.where(torch.abs(theta**2) < EPS,
+    B = torch.where(torch.abs(sigma) < EPS,
+        torch.where(torch.abs(theta) < EPS,
             torch.tensor(1. / 12., dtype=phi.dtype, device=phi.device).unsqueeze(0),
             (theta * torch.sin(theta) + 2. * torch.cos(theta) - 2.) / (2. * theta**2 * (torch.cos(theta) - 1.)),
         ),
-        torch.where(torch.abs(theta**2) < EPS,
+        torch.where(torch.abs(theta) < EPS,
             (scale**2 * sigma - 2. * scale**2 + scale * sigma + 2. * scale) / (2. * scale**3 - 6 * scale**2 + 6 * scale - 2.),
-            -scale * (theta * scale * torch.sin(theta) - theta * torch.sin(theta) + sigma * scale * torch.cos(theta) - scale * sigma + sigma * torch.cos(theta) - sigma) / (theta**2 * (scale**3 - 2. * scale**2 * torch.cos(theta) - scale**2 + 2. * scale * torch.cos(theta) + scale - 1.)),
-        )
+            -scale * (theta * scale * torch.sin(theta) - theta * torch.sin(theta) + sigma * scale * torch.cos(theta) - scale * sigma + sigma * torch.cos(theta) - sigma) / (theta**2 * (scale**2 - 2. * scale * torch.cos(theta) + 1.) * (scale - 1.)), # Better numberic stability
+        ),
     )
 
     I = torch.eye(3, dtype=phi.dtype, device=phi.device).unsqueeze(0)

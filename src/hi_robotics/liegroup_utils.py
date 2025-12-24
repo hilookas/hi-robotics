@@ -174,34 +174,84 @@ def so3_logmap(R: torch.Tensor) -> torch.Tensor:
     return axis_angles
 
 
-def _se3_V_matrix(log_rotation: torch.Tensor) -> torch.Tensor:
+# Copy from: https://github.com/princeton-vl/lietorch/blob/e7df86554156b36846008d8ddbcc4d8521a16554/lietorch/include/rxso3.h
+# See: https://github.com/borglab/gtsam/blob/ef33d45aea433da506447759ec949af30dc8e38f/gtsam/geometry/Similarity3.cpp
+# See: https://jinyongjeong.github.io/Download/SE3/jlblanco2010geometry3d_techrep.pdf
+
+EPS = 1e-6
+
+
+def _se3_get_V(phi: torch.Tensor):
     """
+    _se3_get_V
+
+    No clamp version
+
     A helper function that computes the "V" matrix from [1], Sec 9.4.2.
     [1] https://jinyongjeong.github.io/Download/SE3/jlblanco2010geometry3d_techrep.pdf
+
+    :param phi: shape == (B, 3)
+    :type phi: torch.Tensor
+    :return: shape == (B, 3, 3)
+    :rtype: torch.Tensor
     """
 
-    # rotation is an exponential map of log_rotation
-    # phis ... rotation angles
-    EPS = 1e-4
-    rotation_angles = torch.clamp((log_rotation * log_rotation).sum(1), EPS).sqrt()
-    log_rotation_hat = so3_hat(log_rotation)
+    theta = torch.norm(phi, dim=-1) # shape == (B,)
 
-    V = (
-        torch.eye(3, dtype=log_rotation.dtype, device=log_rotation.device)[None]
-        + log_rotation_hat
-        # pyre-fixme[58]: `**` is not supported for operand types `Tensor` and `int`.
-        * ((1 - torch.cos(rotation_angles)) / (rotation_angles**2))[:, None, None]
-        + (
-            torch.bmm(log_rotation_hat, log_rotation_hat)
-            # pyre-fixme[58]: `**` is not supported for operand types `Tensor` and
-            #  `int`.
-            * ((rotation_angles - torch.sin(rotation_angles)) / (rotation_angles**3))[
-                :, None, None
-            ]
-        )
+    C = torch.where(torch.abs(theta) < EPS,
+        torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
+        torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
     )
 
-    return V
+    A = torch.where(torch.abs(theta) < EPS,
+        torch.tensor(0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
+        (1. - torch.cos(theta)) / (theta**2),
+    )
+
+    B = torch.where(torch.abs(theta) < EPS,
+        torch.tensor(1. / 6., dtype=phi.dtype, device=phi.device).unsqueeze(0),
+        (theta - torch.sin(theta)) / (theta**3),
+    )
+
+    I = torch.eye(3, dtype=phi.dtype, device=phi.device).unsqueeze(0)
+    W = so3_hat(phi)
+    WW = W @ W
+
+    return C * I + A * W + B * WW # shape == (B,3,3)
+
+
+def _se3_get_V_inv(phi: torch.Tensor):
+    """
+    _se3_get_V_inv
+
+    :param phi: shape == (B, 3)
+    :type phi: torch.Tensor
+    :return: shape == (B, 3, 3)
+    :rtype: torch.Tensor
+    """
+
+    theta = torch.norm(phi, dim=-1)
+
+    C = torch.where(torch.abs(theta**2) < EPS,
+        torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
+        torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
+    )
+
+    A = torch.where(torch.abs(theta**2) < EPS,
+        torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
+        torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
+    )
+
+    B = torch.where(torch.abs(theta**2) < EPS,
+        torch.tensor(1. / 12., dtype=phi.dtype, device=phi.device).unsqueeze(0),
+        (theta * torch.sin(theta) + 2. * torch.cos(theta) - 2.) / (2. * theta**2 * (torch.cos(theta) - 1.)),
+    )
+
+    I = torch.eye(3, dtype=phi.dtype, device=phi.device).unsqueeze(0)
+    W = so3_hat(phi)
+    WW = W @ W
+
+    return C * I + A * W + B * WW
 
 
 def se3_expmap(log_transform: torch.Tensor) -> torch.Tensor:
@@ -260,7 +310,7 @@ def se3_expmap(log_transform: torch.Tensor) -> torch.Tensor:
     R = so3_expmap(log_rotation)
 
     # translation is V @ T
-    V = _se3_V_matrix(log_rotation)
+    V = _se3_get_V(log_rotation)
     T = torch.bmm(V, log_translation[:, :, None])[:, :, 0]
 
     transform = torch.zeros(
@@ -340,9 +390,7 @@ def se3_logmap(transform: torch.Tensor) -> torch.Tensor:
     # log_translation is V^-1 @ T
     T = transform[:, :3, 3]
 
-    V = _se3_V_matrix(log_rotation)
-
-    log_translation = torch.linalg.solve(V, T[:, :, None])[:, :, 0]
+    log_translation = (_se3_get_V_inv(log_rotation) @ T[:, :, None])[:, :, 0]
 
     return torch.cat((log_rotation, log_translation), dim=1)
 
@@ -372,13 +420,11 @@ def se3_inv(A: torch.Tensor) -> torch.Tensor:
     return A_inv
 
 
-# See:https://github.com/borglab/gtsam/blob/ef33d45aea433da506447759ec949af30dc8e38f/gtsam/geometry/Similarity3.cpp
-
-
-
-
+# Copy from: https://github.com/princeton-vl/lietorch/blob/e7df86554156b36846008d8ddbcc4d8521a16554/lietorch/include/rxso3.h
+# See: https://github.com/borglab/gtsam/blob/ef33d45aea433da506447759ec949af30dc8e38f/gtsam/geometry/Similarity3.cpp
 
 EPS = 1e-6
+
 
 def _sim3_get_V(phi: torch.Tensor, sigma: torch.Tensor):
     """
@@ -401,30 +447,30 @@ def _sim3_get_V(phi: torch.Tensor, sigma: torch.Tensor):
             torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
         ),
         torch.where(torch.abs(theta) < EPS,
-            (scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)) / sigma,
-            (scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)) / sigma,
+            (scale - 1.) / sigma,
+            (scale - 1.) / sigma,
         )
     )
 
     A = torch.where(torch.abs(sigma) < EPS,
         torch.where(torch.abs(theta) < EPS,
-            torch.tensor(1. / 2., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            (torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0) - torch.cos(theta)) / (theta * theta),
+            torch.tensor(0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
+            (1. - torch.cos(theta)) / (theta**2),
         ),
         torch.where(torch.abs(theta) < EPS,
-            ((sigma - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)) * scale + torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)) / (sigma * sigma),
-            (scale * torch.sin(theta) * sigma + (torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0) - scale * torch.cos(theta)) * theta) / (theta * (theta * theta + sigma * sigma)),
+            ((sigma - 1.) * scale + 1.) / (sigma**2),
+            (scale * torch.sin(theta) * sigma + (1. - scale * torch.cos(theta)) * theta) / (theta * (theta**2 + sigma**2)),
         )
     )
 
     B = torch.where(torch.abs(sigma) < EPS,
         torch.where(torch.abs(theta) < EPS,
             torch.tensor(1. / 6., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            (theta - torch.sin(theta)) / (theta * theta * theta),
+            (theta - torch.sin(theta)) / (theta**3),
         ),
         torch.where(torch.abs(theta) < EPS,
-            (scale * torch.tensor(1. / 2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * sigma * sigma + scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0) - sigma * scale) / (sigma * sigma * sigma),
-            ((scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)) / sigma - ((scale * torch.cos(theta) - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)) * sigma + scale * torch.sin(theta) * theta) / (theta * theta + sigma * sigma)) * torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0) / (theta * theta),
+            (scale * 0.5 * sigma**2 + scale - 1. - sigma * scale) / (sigma**3),
+            ((scale - 1.) / sigma - ((scale * torch.cos(theta) - 1.) * sigma + scale * torch.sin(theta) * theta) / (theta**2 + sigma**2)) * 1. / (theta**2),
         )
     )
 
@@ -433,6 +479,7 @@ def _sim3_get_V(phi: torch.Tensor, sigma: torch.Tensor):
     WW = W @ W
 
     return C * I + A * W + B * WW # shape == (B,3,3)
+
 
 def _sim3_get_V_inv(phi: torch.Tensor, sigma: torch.Tensor):
     """
@@ -449,36 +496,36 @@ def _sim3_get_V_inv(phi: torch.Tensor, sigma: torch.Tensor):
     theta = torch.norm(phi, dim=-1)
     scale = torch.exp(sigma.squeeze(-1))
 
-    C = torch.where(torch.abs(sigma * sigma) < EPS,
-        torch.where(torch.abs(theta * theta) < EPS,
-            torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0) - torch.tensor(1. / 2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * sigma,
-            torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0) - torch.tensor(1. / 2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * sigma,
+    C = torch.where(torch.abs(sigma**2) < EPS,
+        torch.where(torch.abs(theta**2) < EPS,
+            1. - 0.5 * sigma, # ？？？为什么这里有个sigma？？？
+            1. - 0.5 * sigma,
         ),
-        torch.where(torch.abs(theta * theta) < EPS,
-            sigma / (scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)),
-            sigma / (scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)),
+        torch.where(torch.abs(theta**2) < EPS,
+            sigma / (scale - 1.),
+            sigma / (scale - 1.),
         )
     )
 
-    A = torch.where(torch.abs(sigma * sigma) < EPS,
-        torch.where(torch.abs(theta * theta) < EPS,
-            -torch.tensor(1. / 2., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            -torch.tensor(1. / 2., dtype=phi.dtype, device=phi.device).unsqueeze(0),
+    A = torch.where(torch.abs(sigma**2) < EPS,
+        torch.where(torch.abs(theta**2) < EPS,
+            torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
+            torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
         ),
-        torch.where(torch.abs(theta * theta) < EPS,
-            (-sigma * scale + scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)) / ((scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0)) * (scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0))),
-            (theta * scale * torch.cos(theta) - theta - sigma * scale * torch.sin(theta)) / (theta * (scale * scale - torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * scale * torch.cos(theta) + torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0))),
+        torch.where(torch.abs(theta**2) < EPS,
+            (-sigma * scale + scale - 1.) / ((scale - 1.) * (scale - 1.)),
+            (theta * scale * torch.cos(theta) - theta - sigma * scale * torch.sin(theta)) / (theta * (scale**2 - 2. * scale * torch.cos(theta) + 1.)),
         )
     )
 
-    B = torch.where(torch.abs(sigma * sigma) < EPS,
-        torch.where(torch.abs(theta * theta) < EPS,
+    B = torch.where(torch.abs(sigma**2) < EPS,
+        torch.where(torch.abs(theta**2) < EPS,
             torch.tensor(1. / 12., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            (theta * torch.sin(theta) + torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * torch.cos(theta) - torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0)) / (torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * theta * theta * (torch.cos(theta) - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0))),
+            (theta * torch.sin(theta) + 2. * torch.cos(theta) - 2.) / (2. * theta**2 * (torch.cos(theta) - 1.)),
         ),
-        torch.where(torch.abs(theta * theta) < EPS,
-            (scale * scale * sigma - torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * scale * scale + scale * sigma + torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * scale) / (torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * scale * scale * scale - torch.tensor(6, dtype=phi.dtype, device=phi.device).unsqueeze(0) * scale * scale + torch.tensor(6, dtype=phi.dtype, device=phi.device).unsqueeze(0) * scale - torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0)),
-            -scale * (theta * scale * torch.sin(theta) - theta * torch.sin(theta) + sigma * scale * torch.cos(theta) - scale * sigma + sigma * torch.cos(theta) - sigma) / (theta * theta * (scale * scale * scale - torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * scale * scale * torch.cos(theta) - scale * scale + torch.tensor(2., dtype=phi.dtype, device=phi.device).unsqueeze(0) * scale * torch.cos(theta) + scale - torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0))),
+        torch.where(torch.abs(theta**2) < EPS,
+            (scale**2 * sigma - 2. * scale**2 + scale * sigma + 2. * scale) / (2. * scale**3 - 6 * scale**2 + 6 * scale - 2.),
+            -scale * (theta * scale * torch.sin(theta) - theta * torch.sin(theta) + sigma * scale * torch.cos(theta) - scale * sigma + sigma * torch.cos(theta) - sigma) / (theta**2 * (scale**3 - 2. * scale**2 * torch.cos(theta) - scale**2 + 2. * scale * torch.cos(theta) + scale - 1.)),
         )
     )
 
@@ -493,7 +540,6 @@ def sim3_logmap(T: torch.Tensor):
     # To get the logmap, calculate w and lambda, then solve for u as shown by Ethan at
     # See: https://www.ethaneade.org/latex2html/lie/node29.html
     # See: https://www.ethaneade.com/lie.pdf
-    # See: https://jinyongjeong.github.io/Download/SE3/jlblanco2010geometry3d_techrep.pdf
     # See: https://www.cis.upenn.edu/~jean/interp-SIM.pdf
     s = torch.norm(T[:, :3, :3], dim=(1,2)) / torch.sqrt(torch.tensor(3.0, dtype=T.dtype, device=T.device).unsqueeze(0)) # shape == (B,)
     R = T[:, :3, :3] / s.unsqueeze(-1).unsqueeze(-1) # shape == (B,3,3)
@@ -505,6 +551,7 @@ def sim3_logmap(T: torch.Tensor):
 
     v = torch.concat([ lamb, w, rho ], dim=-1)
     return v
+
 
 def sim3_expmap(v: torch.Tensor):
     N, dim1 = v.shape
@@ -524,6 +571,7 @@ def sim3_expmap(v: torch.Tensor):
     T[:, :3, 3] = t
     T[:, 3, 3] = 1.0
     return T
+
 
 if __name__ == "__main__":
     if True:
@@ -552,26 +600,26 @@ if __name__ == "__main__":
 
         print(lietorch.Sim3.exp(torch.tensor([[0,0,0,0,0,0,0.]])).matrix())
         #                  scale  rot   trans              trans   rot scale
-        print(torch.tensor([[0., 0,0,0, 0,0,0]]))
-        print(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,0,0, 0.]])).matrix()))
-        print(torch.tensor([[0., 0,2,0, 0,0,0]]))
-        print(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,2,0, 0.]])).matrix()))
-        print(torch.tensor([[1., 0,0,0, 0,0,0]]))
-        print(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,0,0, 1.]])).matrix()))
-        print(torch.tensor([[1., 0,2,0, 0,0,0]]))
-        print(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,2,0, 1.]])).matrix()))
+        print(torch.tensor([[0., 0,0,0, 0,3,0]]))
+        print(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,0,0, 0.]])).matrix()))
+        print(torch.tensor([[0., 0,2,0, 0,3,0]]))
+        print(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,2,0, 0.]])).matrix()))
+        print(torch.tensor([[1., 0,0,0, 0,3,0]]))
+        print(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,0,0, 1.]])).matrix()))
+        print(torch.tensor([[1., 0,2,0, 0,3,0]]))
+        print(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,2,0, 1.]])).matrix()))
         print()
         print(torch.tensor([[1., 0,0,0, 0,0,2]]))
         print(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,2, 0,0,0, 1.]])).matrix()))
         print()
-        print(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,0,0, 0.]])).matrix())
-        print(sim3_expmap(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,0,0, 0.]])).matrix())))
-        print(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,2,0, 0.]])).matrix())
-        print(sim3_expmap(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,2,0, 0.]])).matrix())))
-        print(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,0,0, 1.]])).matrix())
-        print(sim3_expmap(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,0,0, 1.]])).matrix())))
-        print(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,2,0, 1.]])).matrix())
-        print(sim3_expmap(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,0, 0,2,0, 1.]])).matrix())))
+        print(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,0,0, 0.]])).matrix())
+        print(sim3_expmap(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,0,0, 0.]])).matrix())))
+        print(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,2,0, 0.]])).matrix())
+        print(sim3_expmap(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,2,0, 0.]])).matrix())))
+        print(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,0,0, 1.]])).matrix())
+        print(sim3_expmap(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,0,0, 1.]])).matrix())))
+        print(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,2,0, 1.]])).matrix())
+        print(sim3_expmap(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,3,0, 0,2,0, 1.]])).matrix())))
         print()
         print(lietorch.Sim3.exp(torch.tensor([[0,0,2, 0,0,0, 1.]])).matrix())
         print(sim3_expmap(sim3_logmap(lietorch.Sim3.exp(torch.tensor([[0,0,2, 0,0,0, 1.]])).matrix())))

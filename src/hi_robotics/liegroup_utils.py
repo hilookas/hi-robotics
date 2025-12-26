@@ -458,6 +458,11 @@ def sim3_inv(A: torch.Tensor) -> torch.Tensor:
 EPS = 1e-6
 
 
+def one_minus_cos(theta: torch.Tensor):
+    # 1. - torch.cos(theta)
+    return 2. * (torch.sin(0.5 * theta) ** 2) # Better numeric stability
+
+
 def _sim3_get_V(phi: torch.Tensor, sigma: torch.Tensor):
     """
     _sim3_get_V
@@ -471,21 +476,21 @@ def _sim3_get_V(phi: torch.Tensor, sigma: torch.Tensor):
     """
 
     theta = torch.norm(phi, dim=-1) # shape == (B,)
-    scale = torch.exp(sigma.squeeze(-1)) # shape == (B,)
+    sigma = sigma.squeeze(-1) # shape == (B,)
 
     C = torch.where(torch.abs(sigma) < EPS,
         torch.tensor(1., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-        (scale - 1.) / sigma,
+        ((torch.expm1(sigma) + 1.) - 1.) / sigma,
     )
 
     A = torch.where(torch.abs(sigma) < EPS,
         torch.where(torch.abs(theta) < EPS,
             torch.tensor(0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            (1. - torch.cos(theta)) / (theta**2),
+            (1. - (1. - one_minus_cos(theta))) / (theta**2),
         ),
         torch.where(torch.abs(theta) < EPS,
-            ((sigma - 1.) * scale + 1.) / (sigma**2),
-            (scale * torch.sin(theta) * sigma + (1. - scale * torch.cos(theta)) * theta) / (theta * (theta**2 + sigma**2)),
+            ((sigma - 1.) * (torch.expm1(sigma) + 1.) + 1.) / (sigma**2),
+            ((torch.expm1(sigma) + 1.) * torch.sin(theta) * sigma + (1. - (torch.expm1(sigma) + 1.) * (1. - one_minus_cos(theta))) * theta) / (theta * (theta**2 + sigma**2)),
         ),
     )
 
@@ -495,8 +500,8 @@ def _sim3_get_V(phi: torch.Tensor, sigma: torch.Tensor):
             (theta - torch.sin(theta)) / (theta**3),
         ),
         torch.where(torch.abs(theta) < EPS,
-            (scale * 0.5 * sigma**2 + scale - 1. - sigma * scale) / (sigma**3),
-            ((scale - 1.) / sigma - ((scale * torch.cos(theta) - 1.) * sigma + scale * torch.sin(theta) * theta) / (theta**2 + sigma**2)) / (theta**2),
+            ((torch.expm1(sigma) + 1.) * 0.5 * sigma**2 + (torch.expm1(sigma) + 1.) - 1. - sigma * (torch.expm1(sigma) + 1.)) / (sigma**3),
+            (((torch.expm1(sigma) + 1.) - 1.) / sigma - (((torch.expm1(sigma) + 1.) * (1. - one_minus_cos(theta)) - 1.) * sigma + (torch.expm1(sigma) + 1.) * torch.sin(theta) * theta) / (theta**2 + sigma**2)) / (theta**2),
         ),
     )
 
@@ -519,30 +524,30 @@ def _sim3_get_V_inv(phi: torch.Tensor, sigma: torch.Tensor):
     :rtype: torch.Tensor
     """
 
-    theta = torch.norm(phi, dim=-1)
-    scale = torch.exp(sigma.squeeze(-1))
+    theta = torch.norm(phi, dim=-1) # shape == (B,)
+    sigma = sigma.squeeze(-1) # shape == (B,)
 
     C = torch.where(torch.abs(sigma) < EPS,
         1. - 0.5 * sigma,
-        sigma / (scale - 1.),
+        sigma / ((torch.expm1(sigma) + 1.) - 1.),
     )
 
     A = torch.where(torch.abs(sigma) < EPS,
         torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
         torch.where(torch.abs(theta) < EPS,
-            (-sigma * scale + scale - 1.) / ((scale - 1.) * (scale - 1.)),
-            (theta * scale * torch.cos(theta) - theta - sigma * scale * torch.sin(theta)) / (theta * (scale**2 - 2. * scale * torch.cos(theta) + 1.)),
+            (-sigma * (torch.expm1(sigma) + 1.) + (torch.expm1(sigma) + 1.) - 1.) / (((torch.expm1(sigma) + 1.) - 1.) * ((torch.expm1(sigma) + 1.) - 1.)),
+            (theta * (torch.expm1(sigma) + 1.) * (1. - one_minus_cos(theta)) - theta - sigma * (torch.expm1(sigma) + 1.) * torch.sin(theta)) / (theta * ((torch.expm1(sigma) + 1.)**2 - 2. * (torch.expm1(sigma) + 1.) * (1. - one_minus_cos(theta)) + 1.)),
         ),
     )
 
     B = torch.where(torch.abs(sigma) < EPS,
         torch.where(torch.abs(theta) < EPS,
             torch.tensor(1. / 12., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            (theta * torch.sin(theta) + 2. * torch.cos(theta) - 2.) / (2. * theta**2 * (torch.cos(theta) - 1.)),
+            (theta * torch.sin(theta) + 2. * (1. - one_minus_cos(theta)) - 2.) / (2. * theta**2 * ((1. - one_minus_cos(theta)) - 1.)),
         ),
         torch.where(torch.abs(theta) < EPS,
-            (scale**2 * sigma - 2. * scale**2 + scale * sigma + 2. * scale) / (2. * scale**3 - 6 * scale**2 + 6 * scale - 2.),
-            -scale * (theta * scale * torch.sin(theta) - theta * torch.sin(theta) + sigma * scale * torch.cos(theta) - scale * sigma + sigma * torch.cos(theta) - sigma) / (theta**2 * (scale**2 - 2. * scale * torch.cos(theta) + 1.) * (scale - 1.)), # Better numberic stability
+            ((torch.expm1(sigma) + 1.)**2 * sigma - 2. * (torch.expm1(sigma) + 1.)**2 + (torch.expm1(sigma) + 1.) * sigma + 2. * (torch.expm1(sigma) + 1.)) / (2. * (torch.expm1(sigma) + 1.)**3 - 6 * (torch.expm1(sigma) + 1.)**2 + 6 * (torch.expm1(sigma) + 1.) - 2.),
+            -(torch.expm1(sigma) + 1.) * (theta * (torch.expm1(sigma) + 1.) * torch.sin(theta) - theta * torch.sin(theta) + sigma * (torch.expm1(sigma) + 1.) * (1. - one_minus_cos(theta)) - (torch.expm1(sigma) + 1.) * sigma + sigma * (1. - one_minus_cos(theta)) - sigma) / (theta**2 * ((torch.expm1(sigma) + 1.)**2 - 2. * (torch.expm1(sigma) + 1.) * (1. - one_minus_cos(theta)) + 1.) * ((torch.expm1(sigma) + 1.) - 1.)), # Better numberic stability
         ),
     )
 

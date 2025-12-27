@@ -440,18 +440,18 @@ def sim3_logmap(T: torch.Tensor):
     B = torch.where(torch.abs(sigma) < EPS,
         torch.tensor(-0.5, dtype=phi.dtype, device=phi.device).unsqueeze(0),
         torch.where(torch.abs(theta) < EPS,
-            (-sigma + (1 - sigma)*torch.expm1(sigma))/torch.expm1(sigma)**2,
-            (-sigma*torch.expm1(sigma)*torch.sin(theta) - sigma*torch.sin(theta) - theta*torch.expm1(sigma)*one_minus_cos(theta) + theta*torch.expm1(sigma) - theta*one_minus_cos(theta))/(theta*(torch.expm1(sigma)**2 + 2.0*torch.expm1(sigma)*one_minus_cos(theta) + 2.0*one_minus_cos(theta))),
+            (-sigma + torch.expm1(sigma) - sigma*torch.expm1(sigma)) / torch.expm1(sigma)**2,
+            (-sigma*torch.expm1(sigma)*torch.sin(theta) - sigma*torch.sin(theta) - theta*torch.expm1(sigma)*one_minus_cos(theta) + theta*torch.expm1(sigma) - theta*one_minus_cos(theta)) / (theta*(torch.expm1(sigma)**2 + 2.0*torch.expm1(sigma)*one_minus_cos(theta) + 2.0*one_minus_cos(theta))),
         ),
     )
     C = torch.where(torch.abs(sigma) < EPS,
         torch.where(torch.abs(theta) < EPS,
             torch.tensor(1. / 12., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            -0.5*torch.sin(theta)/(theta*one_minus_cos(theta)) + 1.0/theta**2,
+            -0.5*torch.sin(theta) / (theta*one_minus_cos(theta)) + 1.0/theta**2,
         ),
         torch.where(torch.abs(theta) < EPS,
-            (sigma + (0.5*sigma - 1.0)*torch.expm1(sigma)**2 + (1.5*sigma - 1.0)*torch.expm1(sigma))/torch.expm1(sigma)**3,
-            (sigma*torch.expm1(sigma)**2*one_minus_cos(theta) + 3.0*sigma*torch.expm1(sigma)*one_minus_cos(theta) + 2.0*sigma*one_minus_cos(theta) - theta*torch.expm1(sigma)**2*torch.sin(theta) - theta*torch.expm1(sigma)*torch.sin(theta))/(theta**2*(torch.expm1(sigma)**2 + 2.0*torch.expm1(sigma)*one_minus_cos(theta) + 2.0*one_minus_cos(theta))*torch.expm1(sigma)),
+            (sigma + 0.5*sigma*torch.expm1(sigma)**2 - torch.expm1(sigma)**2 + 1.5*sigma*torch.expm1(sigma) - torch.expm1(sigma)) / torch.expm1(sigma)**3,
+            (sigma*torch.expm1(sigma)**2*one_minus_cos(theta) + 3.0*sigma*torch.expm1(sigma)*one_minus_cos(theta) + 2.0*sigma*one_minus_cos(theta) - theta*torch.expm1(sigma)**2*torch.sin(theta) - theta*torch.expm1(sigma)*torch.sin(theta)) / (theta**2*(torch.expm1(sigma)**2 + 2.0*torch.expm1(sigma)*one_minus_cos(theta) + 2.0*one_minus_cos(theta))*torch.expm1(sigma)),
         ),
     )
     I = torch.eye(3, dtype=phi.dtype, device=phi.device).unsqueeze(0)
@@ -488,18 +488,18 @@ def sim3_expmap(v: torch.Tensor):
             one_minus_cos(theta) / (theta**2),
         ),
         torch.where(torch.abs(theta) < EPS,
-            (sigma*(torch.expm1(sigma) + 1.0) - torch.expm1(sigma))/sigma**2,
-            (sigma*torch.expm1(sigma)*torch.sin(theta) + sigma*torch.sin(theta) + theta*torch.expm1(sigma)*one_minus_cos(theta) - theta*torch.expm1(sigma) + theta*one_minus_cos(theta))/(theta*(sigma**2 + theta**2)),
+            (sigma*torch.expm1(sigma) + sigma - torch.expm1(sigma)) / sigma**2,
+            (sigma*torch.expm1(sigma)*torch.sin(theta) + sigma*torch.sin(theta) + theta*torch.expm1(sigma)*one_minus_cos(theta) - theta*torch.expm1(sigma) + theta*one_minus_cos(theta)) / (theta*(sigma**2 + theta**2)),
         ),
     )
     C = torch.where(torch.abs(sigma) < EPS,
         torch.where(torch.abs(theta) < EPS,
             torch.tensor(1. / 6., dtype=phi.dtype, device=phi.device).unsqueeze(0),
-            (theta - torch.sin(theta))/theta**3,
+            (theta - torch.sin(theta)) / theta**3,
         ),
         torch.where(torch.abs(theta) < EPS,
-            (0.5*sigma**2*(torch.expm1(sigma) + 1) - sigma*(torch.expm1(sigma) + 1.0) + torch.expm1(sigma))/sigma**3,
-            (sigma**2*(torch.expm1(sigma)*one_minus_cos(theta) - torch.expm1(sigma) + one_minus_cos(theta)) - sigma*theta*(torch.expm1(sigma) + 1.0)*torch.sin(theta) + (sigma**2 + theta**2)*torch.expm1(sigma))/(sigma*theta**2*(sigma**2 + theta**2)),
+            (0.5*sigma**2*torch.expm1(sigma) + 0.5*sigma**2 - sigma*torch.expm1(sigma) + sigma + torch.expm1(sigma)) / sigma**3,
+            (sigma**2*torch.expm1(sigma)*one_minus_cos(theta) - sigma**2*torch.expm1(sigma) + sigma**2*one_minus_cos(theta) - sigma*theta*torch.expm1(sigma)*torch.sin(theta) - sigma*theta*torch.sin(theta) + sigma**2*torch.expm1(sigma) + theta**2*torch.expm1(sigma)) / (sigma*theta**2*(sigma**2 + theta**2)),
         ),
     )
     I = torch.eye(3, dtype=phi.dtype, device=phi.device).unsqueeze(0)
@@ -515,6 +515,31 @@ def sim3_expmap(v: torch.Tensor):
     T[:, :3, 3] = t
     T[:, 3, 3] = 1.0
     return T
+
+
+# import sympy as sp
+
+# class sp_expm1(sp.Function):
+#     def fdiff(self, argindex=1):
+#         return sp.exp(self.args[0])
+
+# class sp_one_minus_cos(sp.Function):
+#     def fdiff(self, argindex=1):
+#         return sp.sin(self.args[0])
+
+# sigma, theta = sp.symbols('sigma theta', real=True)
+
+# expr = (-sigma * (sp_expm1(sigma) + 1.) + (sp_expm1(sigma) + 1.) - 1.) / (sp_expm1(sigma) * sp_expm1(sigma))
+
+# simplified_expr = sp.simplify(sp.expand(expr))
+
+# print(sp.latex(simplified_expr))
+# print(simplified_expr)
+
+# # print(expr.diff(x))   # exp(x)
+# # f = lambdify(x, expr)
+# # print(f(1))        # 1.718281828459045
+# # print(f(1e-20))    # 1e-20, unlike exp(x)-1 which would evaluate to 0
 
 
 if __name__ == "__main__":
